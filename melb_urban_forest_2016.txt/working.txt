@@ -1,0 +1,107 @@
+import os
+import sys
+from shapely.geometry import Polygon
+
+# NOTE: please change the path to current setup in your system
+#windows
+if sys.platform.startswith('win'):
+    #location where all the programs will be stored this project location
+    os.chdir(r"C:\Users\Diwakar Sharma\Pictures\PySparkV2")
+    
+    #path of spark installation
+    os.environ['SPARK_HOME'] = "C:\spark"
+
+#do same  if there are other platforms  
+os.curdir
+
+# Create variable for root path
+SPARK_HOME = os.environ['SPARK_HOME']
+
+# Add following paths
+sys.path.insert(0,os.path.join(SPARK_HOME, "python"))
+sys.path.insert(0,os.path.join(SPARK_HOME, "python", "lib"))
+sys.path.insert(0,os.path.join(SPARK_HOME, "python", "lib", "pyspark.zip"))
+sys.path.insert(0,os.path.join(SPARK_HOME, "python", "lib", "py4j-0.10.7-src.zip"))
+
+# Initialize spark session and spark context
+from pyspark.sql import SparkSession
+from pyspark import SparkContext
+from pyspark.sql import Row
+from functools import reduce
+from past.builtins import xrange
+from polygon_utils import *
+
+# create Spark Session
+spSession = SparkSession \
+    .builder \
+    .master("local[2]") \
+    .appName("Pyspark Tuts") \
+    .config("spark.executor.memory", "1g") \
+    .config("spark.cores.max", "2") \
+    .config("spark.sql.warehouse.dir", "file:///C:/temp/spark-warehouse") \
+    .getOrCreate()
+
+# get the spark context from Spark Session
+sparkContext = spSession.sparkContext
+# -*- coding: utf-8 -*-
+
+def cleanedUrbanForest(urbanForestRow):
+    filterexp = urbanForestRow.replace("POLYGON ", "")
+    cleanedRow = '), ('.join(' '.join(s) for s in zip(*[iter(filterexp
+                    .split())]*2)).replace('-', ', -')
+    return list(literal_eval(cleanedRow))
+
+urbanForestRDD = sparkContext.textFile("file:///C:/Users/Diwakar Sharma/Pictures/PySparkV2/melb_urban_forest_2016.txt")
+
+
+from ast import literal_eval
+urbanForestData = urbanForestRDD.map(lambda l: l.split("\""))
+urbanForestMap = urbanForestData.map(lambda x: (x[3]))
+urbanForestMap.first()
+urbanForestCleanedRDD = urbanForestMap.map(lambda x: cleanedUrbanForest(x))
+urbanForestCleanedRDD.take(2)
+
+## melbourne json file
+from collections.abc import Iterable
+
+def flatten(l):
+    for el in l:
+        if isinstance(el, Iterable) and not isinstance(el, (str, bytes)):
+            yield from flatten(el)
+        else:
+            yield el
+
+def to_poly(raw_data):
+    it = iter(list(flatten(raw_data)))
+    return list(zip(it, it))
+
+# read json for inner city as a DataFrame
+innerCityDF = spSession.read.json("file:///C:/Users/Diwakar Sharma/Pictures/PySparkV2/melb_inner_2016.json")
+drop_cols = ["gcc_code16", "gcc_name16", "sa1_7dig16", "sa1_main16", "sa2_5dig16", "sa2_main16",
+"gcc_code16", "gcc_name16", "sa1_7dig16", "sa1_main16", "sa2_5dig16", "sa2_main16", "sa3_code16",
+"sa3_name16", "sa4_code16", "sa4_name16", "ste_code16", "ste_name16", "type" ]
+newDF = innerCityDF.drop(*drop_cols)
+oldColumns = newDF.schema.names
+newColumns = ["Area", "geometry", "suburb"]
+cleanedCityDF = reduce(lambda newDF, idx: newDF.withColumnRenamed(oldColumns[idx], newColumns[idx]), xrange(len(oldColumns)), newDF)
+cleanedCityDF = cleanedCityDF.select("Area", "geometry.coordinates", "suburb")
+
+from pyspark.sql import functions as F
+from pyspark.sql.functions import lit
+melbourneStatsDF = cleanedCityDF.rdd.map(lambda x: (x.Area, to_poly(x.coordinates), x.suburb)).toDF(["Area", "Geo", "Suburb"])
+areaAggDF = melbourneStatsDF.groupBy("Suburb").agg({"Area": "sum"})
+geoAggDF = melbourneStatsDF.groupBy("Suburb").agg(F.collect_list("Geo").alias("Geometry"))
+melbourneStatsDF = areaAggDF.join(geoAggDF, ["Suburb"])
+melbourneStatsDF.show(20)
+
+melbourneStatsDF = melbourneStatsDF.withColumn("ForestArea", lit(0))\
+                   .withColumn("Intersection Area", lit(0))\
+                   .withColumn("Actual Area", lit(0))
+
+
+intermediateMelbourneStatsDF = melbourneStatsDF
+for row in melbourneStatsDF.rdd.collect():
+    intermediateMelbourneStatsDF = intermediateMelbourneStatsDF.rdd.map(lambda x: (x.Suburb, x.Area, x.Geometry, x.ForestArea, 
+    (x.IntersectionArea + intersection_area(row[2], x.Geometry)), x.ActualArea)).toDF(["Suburb", "Area", "Geometry", "ForestArea", "IntersectionArea", "ActualArea"])
+melbourneStatsDF = intermediateMelbourneStatsDF.rdd.map(lambda x: (x.Suburb, x.Area, x.Geometry, x.ForestArea, x.IntersectionArea, ( 2* x.Area - x.IntersectionArea)).toDF(["Suburb", "Area", "Geometry", "ForestArea", "IntersectionArea", "ActualArea"])
+melbourneStatsDF.show(3)
